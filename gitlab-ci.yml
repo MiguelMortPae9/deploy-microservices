@@ -78,9 +78,44 @@ test_application:
 
 deploy_application:
   stage: deploy
-  image: $IMAGE_TAG
+  image: alpine:3.20
   needs:
     - job: build_image
       artifacts: true
+  variables:
+    DEPLOY_ENV: "staging"
+  before_script:
+    - apk add --no-cache openssh-client docker-cli
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_ed25519
+    - chmod 600 ~/.ssh/id_ed25519
+    - printf "Host *\n\tStrictHostKeyChecking no\n" > ~/.ssh/config
+    - |
+      ENV_UPPER=$(echo "$DEPLOY_ENV" | tr '[:lower:]' '[:upper:]')
+      ENV_ENCRYPTED=$(printenv "ENV_${ENV_UPPER}_ENCRYPTED")
+      ENV_KEY=$(printenv "ENV_${ENV_UPPER}_KEY")
+      [ -n "$ENV_ENCRYPTED" ] && [ -n "$ENV_KEY" ] || { echo "Faltan variables ENV_${ENV_UPPER}_ENCRYPTED o ENV_${ENV_UPPER}_KEY"; exit 1; }
+      export ENV_ENCRYPTED ENV_KEY
   script:
-    - echo "Desplegando con la imagen $IMAGE_TAG"
+    - ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH'"
+    - ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" "cat > '$DEPLOY_PATH/docker-compose.yml'" < docker-compose.yml
+    - printf "%s" "$ENV_ENCRYPTED" | ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" "cat > '$DEPLOY_PATH/.env.encrypted'"
+    - ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" "docker login -u '$CI_REGISTRY_USER' -p '$CI_REGISTRY_PASSWORD' '$CI_REGISTRY' && docker pull '$IMAGE_TAG'"
+    - >
+      ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST"
+      "cd '$DEPLOY_PATH' &&
+       docker run --rm
+         -v '$DEPLOY_PATH':/work
+         -w /var/www/html
+         '$IMAGE_TAG'
+         sh -lc 'cp /work/.env.encrypted . &&
+                 php artisan env:decrypt --force --key=\"$ENV_KEY\" --env=\"$DEPLOY_ENV\" &&
+                 cp .env /work/.laravel.env'"
+    - >
+      ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST"
+      "cd '$DEPLOY_PATH' &&
+       APP_IMAGE='$IMAGE_TAG' HOST_HTTP_PORT='${HOST_HTTP_PORT:-80}' CONTAINER_HTTP_PORT='${CONTAINER_HTTP_PORT:-8000}' docker compose pull | cat &&
+       APP_IMAGE='$IMAGE_TAG' HOST_HTTP_PORT='${HOST_HTTP_PORT:-80}' CONTAINER_HTTP_PORT='${CONTAINER_HTTP_PORT:-8000}' docker compose up -d | cat &&
+       docker compose exec -T app php artisan migrate --force"
+  only:
+    - staging
