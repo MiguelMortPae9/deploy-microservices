@@ -1,4 +1,3 @@
-
 stages:
   - quality
   - security
@@ -85,4 +84,3 @@ deploy_application:
       artifacts: true
   script:
     - echo "Desplegando con la imagen $IMAGE_TAG"
-
