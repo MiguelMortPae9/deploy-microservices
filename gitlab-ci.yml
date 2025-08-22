@@ -78,14 +78,17 @@ test_application:
 
 deploy_application:
   stage: deploy
-  image: alpine:3.20
+  image: php:8.4-cli
   needs:
     - job: build_image
       artifacts: true
   variables:
     DEPLOY_ENV: "staging"
   before_script:
-    - apk add --no-cache openssh-client docker-cli
+    - apt-get update && apt-get install -y git unzip curl libzip-dev libicu-dev libxml2-dev zlib1g-dev libonig-dev
+    - docker-php-ext-install zip intl mbstring
+    - curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+    - composer install --no-dev --no-interaction --prefer-dist
     - mkdir -p ~/.ssh
     - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_ed25519
     - chmod 600 ~/.ssh/id_ed25519
@@ -97,24 +100,25 @@ deploy_application:
       [ -n "$ENV_ENCRYPTED" ] && [ -n "$ENV_KEY" ] || { echo "Faltan variables ENV_${ENV_UPPER}_ENCRYPTED o ENV_${ENV_UPPER}_KEY"; exit 1; }
       export ENV_ENCRYPTED ENV_KEY
   script:
+    # Descifrar .env en CI (no en el servidor ni en contenedor de la app)
+    - printf "%s" "$ENV_ENCRYPTED" > .env.encrypted
+    - php artisan env:decrypt --force --key="$ENV_KEY" --env="$DEPLOY_ENV"
+
+    # Preparar servidor y copiar archivos sin secretos en disco persistente
     - ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH'"
     - ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" "cat > '$DEPLOY_PATH/docker-compose.yml'" < docker-compose.yml
-    - printf "%s" "$ENV_ENCRYPTED" | ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" "cat > '$DEPLOY_PATH/.env.encrypted'"
+
+    # Subir .env descifrado a tmpfs del servidor y enlazarlo en el path del proyecto
+    - |
+      ENV_TMP_PATH="/dev/shm/${CI_PROJECT_NAME}_${DEPLOY_ENV}.env"
+      ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" "cat > '$ENV_TMP_PATH'" < .env
+      ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" "ln -sf '$ENV_TMP_PATH' '$DEPLOY_PATH/.laravel.env' && chmod 600 '$ENV_TMP_PATH'"
+
+    # Login al registry y despliegue usando la imagen construida
     - ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" "docker login -u '$CI_REGISTRY_USER' -p '$CI_REGISTRY_PASSWORD' '$CI_REGISTRY' && docker pull '$IMAGE_TAG'"
     - >
       ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST"
       "cd '$DEPLOY_PATH' &&
-       docker run --rm
-         -v '$DEPLOY_PATH':/work
-         -w /var/www/html
-         '$IMAGE_TAG'
-         sh -lc 'cp /work/.env.encrypted . &&
-                 php artisan env:decrypt --force --key=\"$ENV_KEY\" --env=\"$DEPLOY_ENV\" &&
-                 cp .env /work/.laravel.env'"
-    - >
-      ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST"
-      "cd '$DEPLOY_PATH' &&
-       APP_IMAGE='$IMAGE_TAG' HOST_HTTP_PORT='${HOST_HTTP_PORT:-80}' CONTAINER_HTTP_PORT='${CONTAINER_HTTP_PORT:-8000}' docker compose pull | cat &&
        APP_IMAGE='$IMAGE_TAG' HOST_HTTP_PORT='${HOST_HTTP_PORT:-80}' CONTAINER_HTTP_PORT='${CONTAINER_HTTP_PORT:-8000}' docker compose up -d | cat &&
        docker compose exec -T app php artisan migrate --force"
   only:
