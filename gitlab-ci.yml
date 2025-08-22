@@ -1,0 +1,88 @@
+
+stages:
+  - quality
+  - security
+  - build
+  - test
+  - deploy
+
+laravel/pint:
+  stage: quality
+  image: php:8.4-cli
+  variables:
+    COMPOSER_CACHE_DIR: "$CI_PROJECT_DIR/.composer/cache"
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-composer
+    paths:
+      - .composer/cache # Cache de Composer
+  before_script:
+    - echo "Instalando dependencias del sistema..."
+    - apt-get update && apt-get install -y git unzip curl libpng-dev libjpeg-dev libfreetype6-dev libxml2-dev libzip-dev libonig-dev libicu-dev libpq-dev
+    - echo "Configurando PHP..."
+    - docker-php-ext-install bcmath gd intl mbstring pdo pdo_pgsql xml zip
+    - echo "Descargando Composer..."
+    - curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+  script:
+    - echo "Instalando dependencias del proyecto..."
+    - composer install --no-interaction --prefer-dist
+    - echo "Ejecutando Pint..."
+    - ./vendor/bin/pint --test
+  only:
+    - merge_requests
+    - master
+    - staging
+  allow_failure: false
+
+vulnerabilities_scan:
+  stage: security
+  image: returntocorp/semgrep
+  script:
+    - echo "🔍 Escaneo de vulnerabilidades con Semgrep"
+    - semgrep --config=auto .
+  only:
+    - merge_requests
+    - staging
+    - master
+  allow_failure: false
+
+build_image:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  variables:
+    DOCKER_DRIVER: overlay2
+  script:
+    - echo "Construyendo la imagen Docker..."
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" "$CI_REGISTRY" --password-stdin
+    - docker build -t "$CI_REGISTRY_IMAGE:develop-$CI_COMMIT_SHORT_SHA" ./docker
+    - docker push "$CI_REGISTRY_IMAGE:develop-$CI_COMMIT_SHORT_SHA"
+    - docker tag "$CI_REGISTRY_IMAGE:develop-$CI_COMMIT_SHORT_SHA" "$CI_REGISTRY_IMAGE:develop-latest"
+    - echo "IMAGE_TAG=$CI_REGISTRY_IMAGE:develop-$CI_COMMIT_SHORT_SHA" > build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+  only:
+    - merge_requests
+    - staging
+    - master
+
+test_application:
+  stage: test
+  image: $IMAGE_TAG # usa la variable generada por el artifact
+  needs:
+    - job: build_image
+      artifacts: true # indica que necesita los artifacts de build_image
+  script:
+    - echo "Ejecutando tests en la imagen $IMAGE_TAG"
+    - php artisan test
+
+deploy_application:
+  stage: deploy
+  image: $IMAGE_TAG
+  needs:
+    - job: build_image
+      artifacts: true
+  script:
+    - echo "Desplegando con la imagen $IMAGE_TAG"
+
