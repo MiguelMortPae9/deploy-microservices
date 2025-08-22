@@ -1,0 +1,60 @@
+
+services:
+    microservice-template:
+        build:
+            context: './docker'
+            dockerfile: Dockerfile
+            args:
+                WWWGROUP: '${WWWGROUP}'
+        image: 'microservice-template:latest'
+        extra_hosts:
+            - 'host.docker.internal:host-gateway'
+        ports:
+            - '${APP_PORT:-8000}:80'
+        environment:
+            WWWUSER: '${WWWUSER}'
+            LARAVEL_SAIL: 1
+            IGNITION_LOCAL_SITES_PATH: '${PWD}'
+        volumes:
+            - '.:/var/www/html'
+        networks:
+            - sail
+        depends_on:
+            - redis
+            - nightwatch-agent
+
+    redis:
+        image: 'redis:alpine'
+        ports:
+            - '${FORWARD_REDIS_PORT:-6379}:6379'
+        volumes:
+            - 'sail-redis:/data'
+        networks:
+            - sail
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            retries: 3
+            timeout: 5s
+
+    nightwatch-agent:
+        image: laravelphp/nightwatch-agent:latest
+        environment:
+            - NIGHTWATCH_TOKEN='{NIGHTWATCH_TOKEN}'
+        healthcheck:
+            test: php nightwatch-status
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 5s
+        restart: unless-stopped
+        networks:
+            - sail
+
+networks:
+    sail:
+        driver: bridge
+
+volumes:
+    sail-redis:
+        driver: local
+
