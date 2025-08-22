@@ -119,6 +119,6 @@ deploy_application:
        rm -f /dev/shm/.laravel.env"
     - >
       ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" \
-      "cd '$DEPLOY_PATH' && docker compose -f .docker-compose.yml exec -T app php artisan migrate --force"
+      "cd '$DEPLOY_PATH' && docker compose -f .docker-compose.yml exec -T microservice-template php artisan migrate --force"
   only:
     - staging
